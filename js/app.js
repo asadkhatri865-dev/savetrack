@@ -10,6 +10,31 @@
   const PAGE_SIZE = 25;
   const EXPENSE_CATEGORIES = ["Food", "Transport", "Bills", "Education", "Shopping", "Other"];
   const INVEST_TYPES = ["Stocks", "Mutual Funds", "Gold", "Crypto", "Other"];
+  const HALAL_STOCKS = [
+    { symbol: "AAPL", name: "Apple", market: "US", sector: "Technology" },
+    { symbol: "MSFT", name: "Microsoft", market: "US", sector: "Technology" },
+    { symbol: "GOOGL", name: "Alphabet", market: "US", sector: "Technology" },
+    { symbol: "NVDA", name: "NVIDIA", market: "US", sector: "Technology" },
+    { symbol: "AVGO", name: "Broadcom", market: "US", sector: "Technology" },
+    { symbol: "AMD", name: "AMD", market: "US", sector: "Technology" },
+    { symbol: "CSCO", name: "Cisco", market: "US", sector: "Technology" },
+    { symbol: "ORCL", name: "Oracle", market: "US", sector: "Technology" },
+    { symbol: "TSM", name: "TSMC", market: "US", sector: "Technology" },
+    { symbol: "AMAT", name: "Applied Materials", market: "US", sector: "Technology" },
+    { symbol: "CAT", name: "Caterpillar", market: "US", sector: "Industrials" },
+    { symbol: "NVO", name: "Novo Nordisk", market: "US", sector: "Health" },
+    { symbol: "LLY", name: "Eli Lilly", market: "US", sector: "Health" },
+    { symbol: "ISRG", name: "Intuitive Surgical", market: "US", sector: "Health" },
+    { symbol: "COST", name: "Costco", market: "US", sector: "Retail" },
+    { symbol: "HD", name: "Home Depot", market: "US", sector: "Retail" },
+    { symbol: "MEBL.KA", name: "Meezan Bank", market: "PK", sector: "Banking" },
+    { symbol: "SYS.KA", name: "Systems Limited", market: "PK", sector: "Technology" },
+    { symbol: "LUCK.KA", name: "Lucky Cement", market: "PK", sector: "Cement" },
+    { symbol: "ENGRO.KA", name: "Engro", market: "PK", sector: "Conglomerate" },
+    { symbol: "OGDC.KA", name: "OGDC", market: "PK", sector: "Energy" },
+    { symbol: "FFC.KA", name: "Fauji Fertilizer", market: "PK", sector: "Fertilizer" },
+  ];
+  const STOCK_CACHE_KEY = "savetrack.halal.cache.v1";
   const CURRENCY = {
     USD: "$",
     EUR: "€",
@@ -27,6 +52,7 @@
     history: ["History", "Every expense you have recorded"],
     savings: ["Savings goals", "Track progress toward amounts you set"],
     investments: ["Investments", "Holdings you entered — not live prices"],
+    stocks: ["Halal stocks", "Daily prices and 1-month charts — delayed market data"],
     transactions: ["Transactions", "All recorded activity"],
     calculators: ["Calculators", "Estimates only — not financial advice"],
     settings: ["Settings", "Preferences for this browser only"],
@@ -39,6 +65,7 @@
     history: "Add expense",
     savings: "New goal",
     investments: "Add investment",
+    stocks: "Add",
     transactions: "Add",
     calculators: "Add",
     settings: "Add",
@@ -48,6 +75,11 @@
   let currentUser = null;
   let dashPeriod = "month";
   let investView = "cards";
+  let stockQuotes = {};
+  let stockFetchSeq = 0;
+  let stockSelected = "";
+  let stockQuery = "";
+  let stockLoading = false;
   let txnPage = 1;
   let searchTimers = {};
 
@@ -482,7 +514,7 @@
     $("#page-sub").textContent = TITLES[route][1];
     const add = $("#header-add");
     add.textContent = ADD_LABEL[route] || "Add";
-    const hideAdd = route === "settings" || route === "calculators";
+    const hideAdd = route === "settings" || route === "calculators" || route === "stocks";
     add.hidden = hideAdd;
     closeMenu();
     closeSidebar();
@@ -1721,6 +1753,418 @@
     );
   }
 
+  function quoteMoney(n, code) {
+    const map = { USD: "$", PKR: "Rs", EUR: "€", GBP: "£" };
+    const s = map[code] || (code ? code + " " : "$");
+    const sign = n < 0 ? "−" : "";
+    const abs = Math.abs(Number(n) || 0);
+    return sign + s + abs.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function sparkline(series, w, h) {
+    const vals = (series || []).map(function (p) {
+      return p.c;
+    }).filter(function (n) {
+      return n != null && isFinite(n);
+    });
+    if (vals.length < 2) return '<span class="caption">No chart</span>';
+    const min = Math.min.apply(null, vals);
+    const max = Math.max.apply(null, vals);
+    const span = max - min || 1;
+    const pts = vals
+      .map(function (v, i) {
+        const x = (i / (vals.length - 1)) * w;
+        const y = h - 3 - ((v - min) / span) * (h - 6);
+        return x.toFixed(1) + "," + y.toFixed(1);
+      })
+      .join(" ");
+    const up = vals[vals.length - 1] >= vals[0];
+    return (
+      '<svg class="spark" viewBox="0 0 ' +
+      w +
+      " " +
+      h +
+      '" width="' +
+      w +
+      '" height="' +
+      h +
+      '" aria-hidden="true"><polyline fill="none" stroke="' +
+      (up ? "var(--success)" : "var(--danger)") +
+      '" stroke-width="2" points="' +
+      pts +
+      '"/></svg>'
+    );
+  }
+
+  function dailyBarChart(series, w, h) {
+    if (!series || series.length < 2) return '<p class="caption">Not enough daily prices to draw a chart.</p>';
+    const vals = series.map(function (p) {
+      return p.c;
+    });
+    const min = Math.min.apply(null, vals);
+    const max = Math.max.apply(null, vals);
+    const span = max - min || 1;
+    const slot = (w - 8) / series.length;
+    const bw = Math.max(1.5, slot - 1);
+    let bars = "";
+    series.forEach(function (p, i) {
+      const prev = i ? series[i - 1].c : p.c;
+      const x = 4 + i * slot;
+      const bh = Math.max(2, ((p.c - min) / span) * (h - 22));
+      const y = h - 16 - bh;
+      bars +=
+        '<rect x="' +
+        x.toFixed(1) +
+        '" y="' +
+        y.toFixed(1) +
+        '" width="' +
+        bw.toFixed(1) +
+        '" height="' +
+        bh.toFixed(1) +
+        '" rx="1" fill="' +
+        (p.c >= prev ? "var(--success)" : "var(--danger)") +
+        '"/>';
+    });
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    function lab(p) {
+      const d = new Date(p.t * 1000);
+      return d.getDate() + " " + months[d.getMonth()];
+    }
+    const first = series[0];
+    const last = series[series.length - 1];
+    return (
+      '<svg class="daily-bars" viewBox="0 0 ' +
+      w +
+      " " +
+      h +
+      '" width="100%" height="' +
+      h +
+      '" role="img" aria-label="Daily closing prices">' +
+      bars +
+      '<text x="4" y="' +
+      (h - 4) +
+      '" font-size="10" fill="currentColor">' +
+      lab(first) +
+      '</text><text x="' +
+      (w - 4) +
+      '" y="' +
+      (h - 4) +
+      '" font-size="10" text-anchor="end" fill="currentColor">' +
+      lab(last) +
+      "</text></svg>"
+    );
+  }
+
+  function parseYahooChart(data) {
+    const res = data && data.chart && data.chart.result && data.chart.result[0];
+    if (!res) return null;
+    const meta = res.meta || {};
+    const ts = res.timestamp || [];
+    const q0 = (res.indicators && res.indicators.quote && res.indicators.quote[0]) || {};
+    const closes = q0.close || [];
+    const series = [];
+    for (let i = 0; i < ts.length; i++) {
+      if (closes[i] == null || !isFinite(closes[i])) continue;
+      series.push({ t: ts[i], c: Number(closes[i]) });
+    }
+    if (!series.length) return null;
+    const last = series[series.length - 1].c;
+    const prev = series.length > 1 ? series[series.length - 2].c : Number(meta.chartPreviousClose) || last;
+    const first = series[0].c;
+    return {
+      price: last,
+      prev: prev,
+      dayChg: last - prev,
+      dayPct: prev ? ((last - prev) / prev) * 100 : 0,
+      monthChg: last - first,
+      monthPct: first ? ((last - first) / first) * 100 : 0,
+      currency: meta.currency || "USD",
+      series: series,
+      error: "",
+    };
+  }
+
+  function fetchWithTimeout(url, ms) {
+    const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = setTimeout(function () {
+      if (ctrl) ctrl.abort();
+    }, ms || 8000);
+    const opts = ctrl ? { signal: ctrl.signal } : {};
+    return fetch(url, opts).then(function (r) {
+      clearTimeout(timer);
+      if (!r.ok) throw new Error("http");
+      return r.json();
+    }).catch(function (err) {
+      clearTimeout(timer);
+      throw err;
+    });
+  }
+
+  function fetchYahooChart(symbol) {
+    const yurl =
+      "https://query1.finance.yahoo.com/v8/finance/chart/" +
+      encodeURIComponent(symbol) +
+      "?interval=1d&range=1mo";
+    function fromPayload(data) {
+      if (typeof data === "string") data = JSON.parse(data);
+      if (data && typeof data.contents === "string") data = JSON.parse(data.contents);
+      const parsed = parseYahooChart(data);
+      if (!parsed) throw new Error("parse");
+      return parsed;
+    }
+    return fetchWithTimeout("https://api.allorigins.win/get?url=" + encodeURIComponent(yurl), 10000).then(fromPayload);
+  }
+
+  function parseTwelveSeries(data) {
+    if (!data || !data.values || !data.values.length) return null;
+    const rows = data.values.slice().reverse();
+    const series = [];
+    rows.forEach(function (r) {
+      const n = Number(r.close);
+      if (!isFinite(n)) return;
+      const d = new Date(String(r.datetime).slice(0, 10) + "T00:00:00Z");
+      series.push({ t: Math.floor(d.getTime() / 1000), c: n });
+    });
+    if (!series.length) return null;
+    const last = series[series.length - 1].c;
+    const prev = series.length > 1 ? series[series.length - 2].c : last;
+    const first = series[0].c;
+    return {
+      price: last,
+      prev: prev,
+      dayChg: last - prev,
+      dayPct: prev ? ((last - prev) / prev) * 100 : 0,
+      monthChg: last - first,
+      monthPct: first ? ((last - first) / first) * 100 : 0,
+      currency: (data.meta && data.meta.currency) || "USD",
+      series: series,
+      error: "",
+    };
+  }
+
+  function loadStockCache() {
+    try {
+      const raw = localStorage.getItem(STOCK_CACHE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.quotes) stockQuotes = parsed.quotes;
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  function saveStockCache() {
+    try {
+      localStorage.setItem(STOCK_CACHE_KEY, JSON.stringify({ at: Date.now(), quotes: stockQuotes }));
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  function filteredHalalStocks() {
+    const q = String(stockQuery || "").trim().toLowerCase();
+    if (!q) return HALAL_STOCKS.slice();
+    return HALAL_STOCKS.filter(function (s) {
+      return (s.symbol + " " + s.name + " " + s.market + " " + s.sector).toLowerCase().indexOf(q) !== -1;
+    });
+  }
+
+  function renderStockFocus() {
+    const card = $("#stock-focus-card");
+    const title = $("#stock-focus-title");
+    const chart = $("#stock-focus-chart");
+    if (!card || !chart) return;
+    const co = HALAL_STOCKS.find(function (s) {
+      return s.symbol === stockSelected;
+    });
+    const q = stockSelected ? stockQuotes[stockSelected] : null;
+    if (!co || !q || !q.series) {
+      card.hidden = true;
+      return;
+    }
+    card.hidden = false;
+    const up = q.monthChg >= 0;
+    title.textContent = co.name + " (" + co.symbol + ") — daily closes";
+    chart.innerHTML =
+      '<div class="meta-grid"><div><span>Last close</span><strong>' +
+      quoteMoney(q.price, q.currency) +
+      '</strong></div><div><span>Today vs yesterday</span><strong class="' +
+      (q.dayChg > 0 ? "amount-pos" : q.dayChg < 0 ? "amount-neg" : "") +
+      '">' +
+      (q.dayChg > 0 ? "profit " : q.dayChg < 0 ? "loss " : "") +
+      quoteMoney(q.dayChg, q.currency) +
+      " (" +
+      pct(q.dayPct) +
+      ')</strong></div><div><span>~1 month</span><strong class="' +
+      (up ? "amount-pos" : "amount-neg") +
+      '">' +
+      (up ? "profit " : "loss ") +
+      quoteMoney(q.monthChg, q.currency) +
+      " (" +
+      pct(q.monthPct) +
+      ")</strong></div></div>" +
+      dailyBarChart(q.series, 640, 180);
+  }
+
+  function renderHalalStocksPage() {
+    loadStockCache();
+    const search = $("#stock-search");
+    if (search && search.value !== stockQuery) search.value = stockQuery;
+    const list = filteredHalalStocks();
+    const quotes = list
+      .map(function (s) {
+        return stockQuotes[s.symbol];
+      })
+      .filter(function (q) {
+        return q && q.price;
+      });
+    const upN = quotes.filter(function (q) {
+      return q.dayChg > 0;
+    }).length;
+    const downN = quotes.filter(function (q) {
+      return q.dayChg < 0;
+    }).length;
+    $("#stock-market-stats").innerHTML =
+      statCard("Companies listed", String(HALAL_STOCKS.length), "navy", "Illustrative list only") +
+      statCard("Quotes loaded", String(quotes.length) + " / " + String(list.length), "navy", "Delayed market data") +
+      statCard("In profit today", String(upN), "good", "Close higher than previous day") +
+      statCard("In loss today", String(downN), "bad", "Close lower than previous day");
+    const host = $("#stock-list");
+    if (!list.length) {
+      host.innerHTML = emptyHtml("No match", "Try another company or symbol.", "", "#");
+      renderStockFocus();
+      return;
+    }
+    host.innerHTML =
+      '<div class="stock-grid">' +
+      list
+        .map(function (s) {
+          const q = stockQuotes[s.symbol];
+          const selected = stockSelected === s.symbol ? " is-selected" : "";
+          if (!q) {
+            return (
+              '<article class="stock-card' +
+              selected +
+              '" data-stock-open="' +
+              escapeHtml(s.symbol) +
+              '"><div class="stock-top"><div><h3>' +
+              escapeHtml(s.name) +
+              '</h3><span class="badge">' +
+              escapeHtml(s.symbol) +
+              " · " +
+              escapeHtml(s.market) +
+              '</span></div><strong class="stock-px">…</strong></div><p class="caption">Loading daily price…</p></article>'
+            );
+          }
+          if (q.error && !q.price) {
+            return (
+              '<article class="stock-card' +
+              selected +
+              '" data-stock-open="' +
+              escapeHtml(s.symbol) +
+              '"><div class="stock-top"><div><h3>' +
+              escapeHtml(s.name) +
+              '</h3><span class="badge">' +
+              escapeHtml(s.symbol) +
+              '</span></div></div><p class="caption">Could not load this quote. Try Refresh prices.</p></article>'
+            );
+          }
+          const up = q.dayChg > 0;
+          const down = q.dayChg < 0;
+          return (
+            '<article class="stock-card' +
+            selected +
+            (up ? " is-up" : down ? " is-down" : "") +
+            '" data-stock-open="' +
+            escapeHtml(s.symbol) +
+            '"><div class="stock-top"><div><h3>' +
+            escapeHtml(s.name) +
+            '</h3><span class="badge">' +
+            escapeHtml(s.symbol) +
+            " · " +
+            escapeHtml(s.sector) +
+            '</span></div><strong class="stock-px">' +
+            quoteMoney(q.price, q.currency) +
+            '</strong></div><div class="stock-row"><span class="' +
+            (up ? "amount-pos" : down ? "amount-neg" : "") +
+            '">' +
+            (up ? "Profit " : down ? "Loss " : "Flat ") +
+            quoteMoney(q.dayChg, q.currency) +
+            " (" +
+            pct(q.dayPct) +
+            ")</span>" +
+            sparkline(q.series, 120, 36) +
+            '</div><div class="btn-row"><button type="button" class="btn btn-secondary btn-sm" data-stock-open="' +
+            escapeHtml(s.symbol) +
+            '">Daily graph</button><button type="button" class="btn btn-primary btn-sm" data-stock-add="' +
+            escapeHtml(s.symbol) +
+            '">Add to investments</button></div></article>'
+          );
+        })
+        .join("") +
+      "</div>";
+    renderStockFocus();
+    const haveAny = HALAL_STOCKS.some(function (s) {
+      return stockQuotes[s.symbol] && stockQuotes[s.symbol].price;
+    });
+    if (!haveAny && !stockLoading) refreshHalalQuotes(false);
+  }
+
+  function refreshHalalQuotes(force) {
+    stockLoading = true;
+    const status = $("#stock-status");
+    if (status) status.textContent = "Loading delayed daily prices…";
+    const seq = ++stockFetchSeq;
+    function runQueue(items, limit, worker) {
+      let i = 0;
+      const runners = [];
+      function next() {
+        if (i >= items.length) return Promise.resolve();
+        const cur = items[i++];
+        return Promise.resolve(worker(cur)).then(next);
+      }
+      for (let n = 0; n < limit; n++) runners.push(next());
+      return Promise.all(runners);
+    }
+    return runQueue(HALAL_STOCKS, 1, function (s) {
+      if (!force && stockQuotes[s.symbol] && stockQuotes[s.symbol].price && Date.now() - (stockQuotes[s.symbol].at || 0) < 15 * 60 * 1000) {
+        return Promise.resolve();
+      }
+      return fetchYahooChart(s.symbol)
+        .then(function (q) {
+          if (seq !== stockFetchSeq) return;
+          q.at = Date.now();
+          stockQuotes[s.symbol] = q;
+          if (currentRoute() === "stocks") renderHalalStocksPage();
+        })
+        .catch(function () {
+          if (seq !== stockFetchSeq) return;
+          if (!stockQuotes[s.symbol] || !stockQuotes[s.symbol].price) {
+            stockQuotes[s.symbol] = { error: "unavailable", at: Date.now() };
+          }
+        })
+        .then(function () {
+          return new Promise(function (resolve) {
+            setTimeout(resolve, 350);
+          });
+        });
+    }).then(function () {
+      if (seq !== stockFetchSeq) return;
+      stockLoading = false;
+      saveStockCache();
+      const ok = HALAL_STOCKS.filter(function (s) {
+        return stockQuotes[s.symbol] && stockQuotes[s.symbol].price;
+      }).length;
+      if (status) {
+        status.textContent =
+          ok > 0
+            ? "Showing delayed daily closes for " + ok + " companies. Green = profit vs yesterday. Red = loss. Not live. Not a recommendation."
+            : "Could not reach the quote server from this host. Open SaveTrack on http://127.0.0.1 or try Refresh again. GitHub Pages may block some market APIs.";
+      }
+      if (currentRoute() === "stocks") renderHalalStocksPage();
+    });
+  }
+
   function renderTransactionsPage() {
     const q = $("#txn-search").value;
     const type = $("#txn-type").value;
@@ -1810,6 +2254,7 @@
     if (route === "history") renderHistoryPage();
     if (route === "savings") renderSavingsPage();
     if (route === "investments") renderInvestmentsPage();
+    if (route === "stocks") renderHalalStocksPage();
     if (route === "transactions") renderTransactionsPage();
     if (route === "settings") renderSettings();
     $$("input[name=date]").forEach(function (el) {
@@ -2315,6 +2760,7 @@
     }
     else if (route === "savings") openGoalModal(null);
     else if (route === "investments") openInvestModal(null);
+    else if (route === "stocks") refreshHalalQuotes(true);
   }
 
   function findTxn(id) {
@@ -2552,6 +2998,15 @@
       });
       renderInvestmentsPage();
     });
+    $("#stock-refresh").addEventListener("click", function () {
+      refreshHalalQuotes(true);
+    });
+    $("#stock-search").addEventListener("input", function () {
+      stockQuery = $("#stock-search").value;
+      debounce("stk", function () {
+        if (currentRoute() === "stocks") renderHalalStocksPage();
+      });
+    });
     ["txn-search", "txn-type", "txn-sort", "txn-from", "txn-to"].forEach(function (id) {
       $("#" + id).addEventListener("input", function () {
         txnPage = 1;
@@ -2650,6 +3105,28 @@
           toast("Deleted.");
           render();
         });
+      }
+      const sa = e.target.closest("[data-stock-add]");
+      if (sa) {
+        const sym = sa.getAttribute("data-stock-add");
+        const co = HALAL_STOCKS.find(function (s) {
+          return s.symbol === sym;
+        });
+        const q = stockQuotes[sym];
+        if (!co) return;
+        openInvestModal({
+          name: co.name + " (" + co.symbol + ")",
+          type: "Stocks",
+          entryType: "shares",
+          buyPrice: q && q.price ? Math.round(q.price * 100) / 100 : "",
+          currentPrice: q && q.price ? Math.round(q.price * 100) / 100 : "",
+        });
+        return;
+      }
+      const so = e.target.closest("[data-stock-open]");
+      if (so) {
+        stockSelected = so.getAttribute("data-stock-open");
+        if (currentRoute() === "stocks") renderHalalStocksPage();
       }
       const et = e.target.closest("[data-edit-txn]");
       if (et) editFromTxn(et.getAttribute("data-edit-txn"));

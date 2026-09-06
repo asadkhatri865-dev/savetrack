@@ -94,6 +94,10 @@
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V9l5 4 6-8 5 6v8H4z"/></svg>
             Investments
           </a>
+          <a class="nav-item" href="#stocks" data-route="stocks" title="Halal stocks">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V8h3v11H4zM10.5 19V4h3v15h-3zM17 19v-7h3v7h-3z"/></svg>
+            Halal stocks
+          </a>
           <a class="nav-item" href="#transactions" data-route="transactions" title="Transactions">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 7h12M8 12h12M8 17h12"/><circle cx="4" cy="7" r="1.2" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="4" cy="17" r="1.2" fill="currentColor" stroke="none"/></svg>
             Transactions
@@ -346,6 +350,26 @@
               </div>
             </div>
             <div id="invest-list"></div>
+          </section>
+
+          <section class="page" id="page-stocks" data-page="stocks" hidden>
+            <div class="banner banner-warn">
+              Illustrative Shariah-screened company list only — not a fatwa, not a recommendation, not live guaranteed quotes. Prices are delayed market data. SaveTrack does not certify any stock as halal. Not financial advice.
+            </div>
+            <div class="toolbar wrap">
+              <input type="search" id="stock-search" placeholder="Search company or symbol" />
+              <button type="button" class="btn btn-secondary" id="stock-refresh">Refresh prices</button>
+            </div>
+            <p class="caption" id="stock-status"></p>
+            <article class="card chart-wide" id="stock-focus-card" hidden>
+              <div class="card-head">
+                <h2 id="stock-focus-title">Daily price</h2>
+              </div>
+              <div id="stock-focus-chart"></div>
+              <p class="caption">Last ~1 month of daily closes. Up days vs first close in the window is shown as profit; down is loss. Delayed data. Not financial advice.</p>
+            </article>
+            <div class="stat-grid compact" id="stock-market-stats"></div>
+            <div id="stock-list"></div>
           </section>
 
           <section class="page" id="page-transactions" data-page="transactions" hidden>
